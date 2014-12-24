@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright (c) 2008-2013 Benjamin Schweizer and others.
+# Copyright (c) 2008-2014 Benjamin Schweizer and others.
 #
 # Permission to use, copy, modify, and/or distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
@@ -24,9 +24,11 @@
 # Benjamin Schweizer, http://benjamin-schweizer.de/contact
 # Uwe Menges
 # John Keith Hohm <john at hohm dot net>
-#
+# Mosharaf Chowdhury
+# 
 # Changes
 # ~~~~~~~
+# 2014-12-24, mosharaf: configurable minimum block size (default 512)
 # 2013-04-19, benjamin: support for non-root users
 # 2011-02-10, john: added win32 support
 # 2010-09-13, benjamin: increased num_threads default to 32 (max-ncq)
@@ -46,11 +48,12 @@ USAGE = """Copyright (c) 2008-2013 Benjamin Schweizer and others.
 
 usage:
 
-    iops [-n|--num_threads threads] [-t|--time time] <device>
+    iops [-n|--num_threads threads] [-t|--time time] [-m|--min-blocksize] <device>
 
-    threads := number of concurrent io threads, default 32
-    time    := time in seconds, default 2
-    device  := some block device, like /dev/sda or \\\\.\\PhysicalDrive0
+    threads   := number of concurrent io threads, default 32
+    time      := time in seconds, default 2
+    blocksize := minimum size of block to start from, default 512
+    device    := some block device, like /dev/sda or \\\\.\\PhysicalDrive0
 
 example:
 
@@ -169,7 +172,7 @@ def greek(value, precision=0, prefix=None):
     if precision == 0:
         return "%3.d %s" % (int(value/factor), suffix)
     else:
-        fmt="%%%d.%df %%s" % (4+precision, precision)
+        fmt="%%%d.%df %%s" % (5+precision, precision)
         return fmt % (float(value)/factor, suffix)
 
 
@@ -201,6 +204,7 @@ def iops(dev, blocksize=512, t=2):
 
 if __name__ == '__main__':
     # parse cli
+    min_blocksize = 512
     t = 2
     num_threads = 32
     dev = None
@@ -214,11 +218,13 @@ if __name__ == '__main__':
             num_threads = int(sys.argv.pop(0))
         elif arg in ['-t', '--time']:
             t = int(sys.argv.pop(0))
+        elif arg in ['-m', '--min-blocksize']:
+            min_blocksize = int(sys.argv.pop(0))
         else:
             dev = arg
 
     # run benchmark
-    blocksize = 512
+    blocksize = min_blocksize
     try:
         print "%s, %sB, %d threads:" % (dev, greek(mediasize(dev), 2, 'si'), num_threads)
         _iops = num_threads+1 # initial loop
