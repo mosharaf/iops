@@ -28,7 +28,7 @@
 # 
 # Changes
 # ~~~~~~~
-# 2014-12-24, mosharaf: configurable minimum block size (default 512)
+# 2014-12-24, mosharaf: configurable minimum blocksize and cache clerance
 # 2013-04-19, benjamin: support for non-root users
 # 2011-02-10, john: added win32 support
 # 2010-09-13, benjamin: increased num_threads default to 32 (max-ncq)
@@ -48,11 +48,12 @@ USAGE = """Copyright (c) 2008-2013 Benjamin Schweizer and others.
 
 usage:
 
-    iops [-n|--num_threads threads] [-t|--time time] [-m|--min-blocksize] <device>
+    iops [-n|--num_threads threads] [-t|--time time] [-m|--min-blocksize] [-d|--dont-clear-diskcache] <device>
 
     threads   := number of concurrent io threads, default 32
     time      := time in seconds, default 2
     blocksize := minimum size of block to start from, default 512
+    caching   := don't clear disk cache between runs, default 'clear cache'
     device    := some block device, like /dev/sda or \\\\.\\PhysicalDrive0
 
 example:
@@ -201,9 +202,19 @@ def iops(dev, blocksize=512, t=2):
 
     return count/t
 
+def clear_disk_cache():
+  """clears disk buffer cache between runs"""
+  
+  if "linux" in sys.platform:
+    import subprocess
+    subprocess.Popen("sync && echo 3 > /proc/sys/vm/drop_caches", stdout=subprocess.PIPE, shell=True)
+  else:
+    sys.err.write("WARNING: Cannot clear disk cache in " + sys.platform + "\n")
+    sys.err.write("WARNING: Add -d OR --dont-clear-diskcache to hide this warning.\n")
 
 if __name__ == '__main__':
     # parse cli
+    clear_diskcache = True
     min_blocksize = 512
     t = 2
     num_threads = 32
@@ -220,6 +231,8 @@ if __name__ == '__main__':
             t = int(sys.argv.pop(0))
         elif arg in ['-m', '--min-blocksize']:
             min_blocksize = int(sys.argv.pop(0))
+        elif arg in ['-d', '--dont-clear-diskcache']:
+            clear_diskcache = False
         else:
             dev = arg
 
@@ -229,6 +242,9 @@ if __name__ == '__main__':
         print "%s, %sB, %d threads:" % (dev, greek(mediasize(dev), 2, 'si'), num_threads)
         _iops = num_threads+1 # initial loop
         while _iops > num_threads and blocksize < mediasize(dev):
+            if clear_diskcache:
+              clear_disk_cache()
+          
             # threading boilerplate
             threads = []
             results = []
