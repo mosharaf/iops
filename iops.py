@@ -28,7 +28,7 @@
 # 
 # Changes
 # ~~~~~~~
-# 2014-12-24, mosharaf: configurable minimum blocksize and cache clerance
+# 2014-12-24, mosharaf: configurable min block, caching, and exp. mmap benchmark
 # 2013-04-19, benjamin: support for non-root users
 # 2011-02-10, john: added win32 support
 # 2010-09-13, benjamin: increased num_threads default to 32 (max-ncq)
@@ -48,13 +48,14 @@ USAGE = """Copyright (c) 2008-2013 Benjamin Schweizer and others.
 
 usage:
 
-    iops [-n|--num_threads threads] [-t|--time time] [-m|--min-blocksize] [-d|--dont-clear-diskcache] <device>
+    iops [-n|--num_threads threads] [-t|--time time] [-m|--min-blocksize blocksize] [-d|--dont-clear-diskcache] <device | -r|--in-memory size-in-GB dir>
 
-    threads   := number of concurrent io threads, default 32
-    time      := time in seconds, default 2
-    blocksize := minimum size of block to start from, default 512
-    caching   := don't clear disk cache between runs, default 'clear cache'
-    device    := some block device, like /dev/sda or \\\\.\\PhysicalDrive0
+    threads    := number of concurrent io threads, default 32
+    time       := time in seconds, default 2
+    blocksize  := minimum size of block to start from, default 512
+    disk-cache := don't clear disk cache between runs, default 'clear cache'
+    device     := some block device, like /dev/sda or \\\\.\\PhysicalDrive0
+    in-memory  := create a file of size GB in dir, memory-map it, and then benchmark
 
 example:
 
@@ -71,8 +72,12 @@ import random
 import time
 import threading
 
-def mediasize(dev):
+def mediasize(dev, in_memory=False, GB=0):
     """report the media size for a device, platform specific code"""
+    
+    if in_memory:
+        return GB * (1024 * 1024 * 1024) 
+    
     # caching
     global _mediasizes
     if not '_mediasizes' in globals(): _mediasizes = {}
@@ -177,30 +182,37 @@ def greek(value, precision=0, prefix=None):
         return fmt % (float(value)/factor, suffix)
 
 
-def iops(dev, blocksize=512, t=2):
+def iops(dev, blocksize=512, t=2, in_memory=False):
     """measure input/output operations per second
     Perform random 512b aligned reads of blocksize bytes on fh for t seconds
     and print a stats line
     Returns: IOs/s
     """
 
-    fh = open(dev, 'r')
-    count = 0
-    start = time.time()
-    while time.time() < start+t:
-        count += 1
-        pos = random.randint(0, mediasize(dev) - blocksize) # need at least one block left
-        #pos &= ~0x1ff   # freebsd8: pos needs 512B sector alignment
-        pos &= ~(blocksize-1)   # sector alignment at blocksize
-        fh.seek(pos)
-        blockdata = fh.read(blocksize)
-    end = time.time()
+    def workload(file_handle, t):
+      count = 0
+      start = time.time()
+      while time.time() < start+t:
+          count += 1
+          pos = random.randint(0, mediasize(dev) - blocksize) # need at least one block left
+          #pos &= ~0x1ff   # freebsd8: pos needs 512B sector alignment
+          pos &= ~(blocksize-1)   # sector alignment at blocksize
+          file_handle.seek(pos)
+          blockdata = file_handle.read(blocksize)
+      end = time.time()
+      t = end - start
+      return count/t
+  
+    with open(dev, 'r') as fh:
+        if not in_memory:
+            retval = workload(fh, t)
+        else:
+            import mmap
+            import contextlib
+            with contextlib.closing(mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)) as m:
+                retval = workload(m, t)
 
-    t = end - start
-
-    fh.close()
-
-    return count/t
+    return retval
 
 def clear_disk_cache():
   """clears disk buffer cache between runs"""
@@ -212,6 +224,16 @@ def clear_disk_cache():
     sys.err.write("WARNING: Cannot clear disk cache in " + sys.platform + "\n")
     sys.err.write("WARNING: Add -d OR --dont-clear-diskcache to hide this warning.\n")
 
+
+def create_file(filename, GB):
+  """creates a file at specified location of specified size"""
+  
+  if "linux" in sys.platform:
+    import subprocess
+    proc = subprocess.Popen("dd if=/dev/zero of=%s bs=1024 count=$((1024 * 1024 * %d)) >/dev/null 2>/dev/null" % (filename, GB), stdout=subprocess.PIPE, shell=True)
+    proc.wait()
+  
+
 if __name__ == '__main__':
     # parse cli
     clear_diskcache = True
@@ -219,6 +241,9 @@ if __name__ == '__main__':
     t = 2
     num_threads = 32
     dev = None
+    in_memory = False
+    GB = 0
+    loc = ""
 
     if len(sys.argv) < 2:
         raise SystemExit(USAGE)
@@ -233,17 +258,27 @@ if __name__ == '__main__':
             min_blocksize = int(sys.argv.pop(0))
         elif arg in ['-d', '--dont-clear-diskcache']:
             clear_diskcache = False
+        elif arg in ['-r', '--in-memory']:
+            in_memory = True
+            GB = int(sys.argv.pop(0))
+            loc = sys.argv.pop(0)
         else:
-            dev = arg
+            if not in_memory:
+              dev = arg
+
+    # Prepare in-memory
+    if in_memory:
+        dev = loc + "/" + str(GB) + "GBFile"
+        create_file(dev, GB)
 
     # run benchmark
     blocksize = min_blocksize
     try:
-        print "%s, %sB, %d threads:" % (dev, greek(mediasize(dev), 2, 'si'), num_threads)
+        print "%s, %sB, %d threads:" % (dev, greek(mediasize(dev, in_memory, GB), 2, 'si'), num_threads)
         _iops = num_threads+1 # initial loop
-        while _iops > num_threads and blocksize < mediasize(dev):
-            if clear_diskcache:
-              clear_disk_cache()
+        while _iops > num_threads and blocksize < mediasize(dev, in_memory, GB):
+            if clear_diskcache and not in_memory:
+                clear_disk_cache()
           
             # threading boilerplate
             threads = []
@@ -255,7 +290,7 @@ if __name__ == '__main__':
                 results.append(result)
 
             for i in range(0, num_threads):
-                _t = threading.Thread(target=results_wrap, args=(results, iops, dev, blocksize, t,))
+                _t = threading.Thread(target=results_wrap, args=(results, iops, dev, blocksize, t, in_memory,))
                 _t.start()
                 threads.append(_t)
 
@@ -264,7 +299,7 @@ if __name__ == '__main__':
             _iops = sum(results)
 
             bandwidth = int(blocksize*_iops)
-            print " %sB blocks: %6.1f IO/s, %sB/s (%sbit/s)" % (greek(blocksize), _iops,
+            print " %sB blocks: %8.1f IO/s, %sB/s (%sbit/s)" % (greek(blocksize), _iops,
                 greek(bandwidth, 1), greek(8*bandwidth, 1, 'si'))
 
             blocksize *= 2
