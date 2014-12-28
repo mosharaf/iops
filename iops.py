@@ -71,6 +71,9 @@ import struct
 import random
 import time
 import threading
+import mmap
+import contextlib
+
 
 def mediasize(dev, in_memory=False, GB=0):
     """report the media size for a device, platform specific code"""
@@ -146,6 +149,7 @@ def mediasize(dev, in_memory=False, GB=0):
     _mediasizes[dev] = mediasize
     return mediasize
 
+
 def greek(value, precision=0, prefix=None):
     """Return a string representing the IEC or SI suffix of a value"""
     # Copyright (c) 1999 Martin Pohl, copied from
@@ -182,19 +186,36 @@ def greek(value, precision=0, prefix=None):
         return fmt % (float(value)/factor, suffix)
 
 
-def iops(dev, blocksize=512, t=2, in_memory=False):
+def meg(value, precision=0, prefix=None):
+    """returns the value converted to IEC or SI Meg"""
+  
+    if prefix:
+        (factor, suffix) = (10** 6, 'M')
+    else:
+        (factor, suffix) = (1<<20L, 'Mi')
+  
+    if precision == 0:
+        return "%3.d %s" % (int(value/factor), suffix)
+    else:
+        fmt="%%%d.%df %%s" % (5+precision, precision)
+        return fmt % (float(value)/factor, suffix)
+  
+
+def iops(dev, seed, blocksize=512, t=2, in_memory=False):
     """measure input/output operations per second
     Perform random 512b aligned reads of blocksize bytes on fh for t seconds
     and print a stats line
     Returns: IOs/s
     """
 
+    rangen = random.Random(seed)
+
     def workload(file_handle, t):
       count = 0
       start = time.time()
       while time.time() < start+t:
           count += 1
-          pos = random.randint(0, mediasize(dev) - blocksize) # need at least one block left
+          pos = rangen.randint(0, mediasize(dev) - blocksize) # need at least one block left
           #pos &= ~0x1ff   # freebsd8: pos needs 512B sector alignment
           pos &= ~(blocksize-1)   # sector alignment at blocksize
           file_handle.seek(pos)
@@ -207,31 +228,40 @@ def iops(dev, blocksize=512, t=2, in_memory=False):
         if not in_memory:
             retval = workload(fh, t)
         else:
-            import mmap
-            import contextlib
             with contextlib.closing(mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)) as m:
                 retval = workload(m, t)
 
     return retval
 
+
 def clear_disk_cache():
-  """clears disk buffer cache between runs"""
+    """clears disk buffer cache between runs"""
   
-  if "linux" in sys.platform:
-    import subprocess
-    subprocess.Popen("sync && echo 3 > /proc/sys/vm/drop_caches", stdout=subprocess.PIPE, shell=True)
-  else:
-    sys.err.write("WARNING: Cannot clear disk cache in " + sys.platform + "\n")
-    sys.err.write("WARNING: Add -d OR --dont-clear-diskcache to hide this warning.\n")
+    if "linux" in sys.platform:
+        import subprocess
+        subprocess.Popen("sync && echo 3 > /proc/sys/vm/drop_caches", stdout=subprocess.PIPE, shell=True)
+    else:
+        sys.err.write("WARNING: Cannot clear disk cache in " + sys.platform + "\n")
+        sys.err.write("WARNING: Add -d OR --dont-clear-diskcache to hide this warning.\n")
 
 
 def create_file(filename, GB):
-  """creates a file at specified location of specified size"""
+    """creates a file at specified location of specified size"""
   
-  if "linux" in sys.platform:
-    import subprocess
-    proc = subprocess.Popen("dd if=/dev/zero of=%s bs=1024 count=$((1024 * 1024 * %d)) >/dev/null 2>/dev/null" % (filename, GB), stdout=subprocess.PIPE, shell=True)
-    proc.wait()
+    if "linux" in sys.platform:
+        import subprocess
+        proc = subprocess.Popen("dd if=/dev/zero of=%s bs=1024 count=$((1024 * 1024 * %d)) >/dev/null 2>/dev/null" % (filename, GB), stdout=subprocess.PIPE, shell=True)
+        proc.wait()
+
+
+def warmup(datafile, size):
+    """reads the entire datafile"""
+  
+    with open(datafile, 'r') as fh:
+        with contextlib.closing(mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)) as m:
+            for pos in range(0, size, 4096):
+              m.seek(pos)
+              m.read(4096)
   
 
 if __name__ == '__main__':
@@ -270,6 +300,7 @@ if __name__ == '__main__':
     if in_memory:
         dev = loc + "/" + str(GB) + "GBFile"
         create_file(dev, GB)
+        warmup(dev, GB * (1048576 * 1024))
 
     # run benchmark
     blocksize = min_blocksize
@@ -290,7 +321,7 @@ if __name__ == '__main__':
                 results.append(result)
 
             for i in range(0, num_threads):
-                _t = threading.Thread(target=results_wrap, args=(results, iops, dev, blocksize, t, in_memory,))
+                _t = threading.Thread(target=results_wrap, args=(results, iops, dev, i, blocksize, t, in_memory,))
                 _t.start()
                 threads.append(_t)
 
@@ -299,8 +330,8 @@ if __name__ == '__main__':
             _iops = sum(results)
 
             bandwidth = int(blocksize*_iops)
-            print " %sB blocks: %8.1f IO/s, %sB/s (%sbit/s)" % (greek(blocksize), _iops,
-                greek(bandwidth, 1), greek(8*bandwidth, 1, 'si'))
+            print " %sB blocks: %8.1f IO/s, %sB/s %sbit/s" % (greek(blocksize), _iops,
+                meg(bandwidth, 1), meg(8*bandwidth, 1, 'si'))
 
             blocksize *= 2
     except IOError, (err_no, err_str):
